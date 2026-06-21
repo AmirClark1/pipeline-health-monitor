@@ -12,6 +12,18 @@ This project helps answer one operational question:
 
 The app is designed to reduce manual review across failure emails, task history, dynamic table status, and ad hoc dashboards by surfacing the highest-priority pipeline issues first.
 
+Skills Demonstrated
+
+• Snowflake
+• Snowpark
+• Streamlit
+• SQL
+• Data Operations Monitoring
+• Root Cause Analysis
+• Failure Trend Analysis
+• Data Engineering Workflow Monitoring
+• Dashboard Development
+
 ## Current Version
 
 ### Phase 1: Snowflake-Native Report
