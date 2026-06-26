@@ -1,38 +1,77 @@
+"""
+Pipeline Health Monitor
+=======================
+
+Author: Amir Clark
+Project: Pipeline Health Monitor - Phase 1
+Technology: Snowflake, Streamlit, Snowpark, Python
+
+Description:
+A Snowflake-native operational dashboard that monitors Task and Dynamic Table
+health using precomputed reporting tables. The application prioritizes active
+failures, recent recovered failures, stale pipelines, and recurring root causes
+while providing guided investigation steps for operators.
+
+Design Goals:
+- Read-only reporting
+- Low-cost architecture
+- No live metadata scanning from the Streamlit layer
+- Precomputed Snowflake report tables
+- Operational triage workflow
+- Manager/operator-friendly design
+
+Note:
+Replace the placeholder database and schema values below with your Snowflake
+deployment values.
+"""
+
 import streamlit as st
 import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
-st.set_page_config(page_title="Pipeline Health Monitor", layout="wide")
 
-st.title("Pipeline Health Monitor")
-st.caption(
-    "Phase 1: Snowflake-native report using precomputed Task and Dynamic Table metadata."
+# ======================================================
+# App Configuration
+# ======================================================
+
+APP_TITLE = "Pipeline Health Monitor"
+APP_PHASE = "Phase 1"
+APP_DESCRIPTION = (
+    "Snowflake-native report using precomputed Task and Dynamic Table metadata."
 )
 
-# Scrubbed placeholders. Replace these in your Snowflake deployment with the
-# database and schema that contain the precomputed reporting tables.
 REPORT_DATABASE = "YOUR_DATABASE"
 REPORT_SCHEMA = "YOUR_PIPELINE_MONITOR_SCHEMA"
 SUMMARY_REPORT_TABLE = "PIPELINE_SUMMARY_REPORT"
 ROOT_CAUSE_REPORT_TABLE = "PIPELINE_ROOT_CAUSE_REPORT"
 
+STALE_THRESHOLD_HOURS = 6
+RESULT_LIMIT = 500
+
+
+# ======================================================
+# Streamlit Page Setup
+# ======================================================
+
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+
+st.title(APP_TITLE)
+st.caption(f"{APP_PHASE} — {APP_DESCRIPTION}")
+
 session = get_active_session()
 
-summary_query = f"""
-SELECT *
-FROM {REPORT_DATABASE}.{REPORT_SCHEMA}.{SUMMARY_REPORT_TABLE}
-ORDER BY STATUS_SORT DESC, FAILURES_7D DESC, STALE_HOURS DESC
-LIMIT 500
-"""
-
-root_query = f"""
-SELECT *
-FROM {REPORT_DATABASE}.{REPORT_SCHEMA}.{ROOT_CAUSE_REPORT_TABLE}
-ORDER BY FAILURE_COUNT DESC
-"""
+summary_table = f"{REPORT_DATABASE}.{REPORT_SCHEMA}.{SUMMARY_REPORT_TABLE}"
+root_cause_table = f"{REPORT_DATABASE}.{REPORT_SCHEMA}.{ROOT_CAUSE_REPORT_TABLE}"
 
 
-def categorize_error(error):
+# ======================================================
+# Helper Functions
+# ======================================================
+
+def categorize_error(error: str) -> str:
+    """
+    Convert raw Snowflake error messages into operational issue categories.
+    """
     if pd.isna(error) or str(error).strip() == "":
         return "No Error"
 
@@ -50,11 +89,16 @@ def categorize_error(error):
         return "SQL / Query Issue"
     if "internal error" in error_text or "incident" in error_text:
         return "Snowflake Internal Error"
+
     return "Other"
 
 
-def get_risk_reason(row):
+def get_risk_reason(row: pd.Series) -> str:
+    """
+    Explain why a pipeline is being flagged for review.
+    """
     last_status = row.get("LAST_STATUS")
+    failures_24h = row.get("FAILURES_24H", 0) or 0
     failures_7d = row.get("FAILURES_7D", 0) or 0
     stale_hours = row.get("STALE_HOURS", 0) or 0
     risk_level = row.get("RISK_LEVEL")
@@ -64,28 +108,87 @@ def get_risk_reason(row):
         return "Currently failed with repeated failures this week"
     if last_status == "FAILED":
         return "Current latest run failed"
+    if failures_24h > 0:
+        return "Failed recently but latest status may have recovered"
+    if failures_7d > 0:
+        return "Recent failures detected this week"
     if risk_level in ["HIGH", "CRITICAL"]:
         return "High-risk pipeline"
-    if stale_hours > 6:
+    if stale_hours > STALE_THRESHOLD_HOURS:
         return "Pipeline may be stale"
     if failure_trend == "▲ Getting Worse":
         return "Failure count increased compared to last week"
     if last_status == "SKIPPED":
         return "Pipeline was skipped"
+
     return "No major issue detected"
 
 
-def review_category(row):
+def review_category(row: pd.Series) -> str:
+    """
+    Assign the pipeline to an operational triage category.
+    """
     if row.get("LAST_STATUS") == "FAILED":
         return "Active Failure"
+    if (row.get("FAILURES_24H", 0) or 0) > 0:
+        return "Recent Failure"
     if row.get("RISK_LEVEL") in ["HIGH", "CRITICAL"]:
         return "High Risk"
-    if (row.get("STALE_HOURS", 0) or 0) > 6:
-        return "Stale / Review Needed"
+    if (row.get("STALE_HOURS", 0) or 0) > STALE_THRESHOLD_HOURS:
+        return "Stale Review"
+
     return "No Action"
 
 
-def clean_display(input_df, display_cols):
+def priority_label(row: pd.Series) -> str:
+    """
+    Convert review category into an operator-friendly priority label.
+    """
+    if row["REVIEW_CATEGORY"] == "Active Failure":
+        return "Critical"
+    if row["REVIEW_CATEGORY"] == "Recent Failure":
+        return "Warning"
+    if row["REVIEW_CATEGORY"] == "High Risk":
+        return "Monitor"
+    if row["REVIEW_CATEGORY"] == "Stale Review":
+        return "Review"
+
+    return "Healthy"
+
+
+def normalize_text(value: str) -> str:
+    """
+    Normalize text so drilldown search can match names with or without
+    dashes, underscores, or spaces.
+    """
+    return (
+        str(value)
+        .lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
+    )
+
+
+def format_stale_hours(stale_hours: float) -> str:
+    """
+    Convert stale-hour numeric values into readable text.
+    """
+    if pd.isna(stale_hours):
+        return "Unknown"
+
+    if stale_hours < 1:
+        return "Less than 1 hour ago"
+    if stale_hours == 1:
+        return "1 hour ago"
+
+    return f"{int(stale_hours)} hours ago"
+
+
+def clean_display(input_df: pd.DataFrame, display_cols: list[str]) -> pd.DataFrame:
+    """
+    Format dataframe columns for user-facing tables.
+    """
     output_df = input_df[display_cols].copy()
 
     output_df["LAST_STATUS"] = output_df["LAST_STATUS"].replace(
@@ -96,40 +199,165 @@ def clean_display(input_df, display_cols):
         }
     )
 
-    return output_df.rename(
+    output_df = output_df.rename(
         columns={
+            "PRIORITY": "Priority",
+            "FULL_PIPELINE_NAME": "Full Pipeline Name",
             "PIPELINE_NAME": "Pipeline",
             "OBJECT_TYPE": "Type",
             "LAST_STATUS": "Status",
+            "REVIEW_CATEGORY": "Investigation Status",
             "ISSUE_CATEGORY": "Issue Category",
-            "FAILURES_24H": "Failures Today",
+            "FAILURES_24H": "Failures Last 24H",
             "FAILURES_7D": "Failures This Week",
             "FAILURES_PREVIOUS_7D": "Failures Last Week",
+            "FAILURE_CHANGE": "Failure Change",
             "FAILURE_TREND": "Trend",
-            "RISK_LEVEL": "Risk",
-            "RISK_REASON": "Why This Matters",
-            "STALE_HOURS": "Hours Since Last Run",
+            "RISK_LEVEL": "Risk Score",
+            "RISK_REASON": "Operational Impact",
+            "STALE_HOURS": "Last Refresh (Hours)",
             "ERROR_MESSAGE": "Last Error",
         }
     )
 
+    return output_df
 
-df = session.sql(summary_query).to_pandas()
-root_df = session.sql(root_query).to_pandas()
 
-last_report_time = session.sql(
-    """
-SELECT CURRENT_TIMESTAMP() AS LAST_REPORT_TIME
+# ======================================================
+# Load Report Data
+# ======================================================
+
+summary_query = f"""
+SELECT *
+FROM {summary_table}
+ORDER BY STATUS_SORT DESC, FAILURES_7D DESC, STALE_HOURS DESC
+LIMIT {RESULT_LIMIT}
 """
-).to_pandas()["LAST_REPORT_TIME"].iloc[0]
+
+root_query = f"""
+SELECT *
+FROM {root_cause_table}
+ORDER BY FAILURE_COUNT DESC
+"""
+
+refresh_col, caption_col = st.columns([1, 5])
+
+with refresh_col:
+    if st.button("Refresh"):
+        st.rerun()
+
+try:
+    df = session.sql(summary_query).to_pandas()
+except Exception as exc:
+    st.error(f"Failed to load summary report data: {str(exc)}")
+    st.caption(
+        "Check that the summary report table exists and that the active role has access."
+    )
+    st.stop()
+
+try:
+    root_df = session.sql(root_query).to_pandas()
+except Exception as exc:
+    st.warning(f"Could not load root cause report data: {str(exc)}")
+    root_df = pd.DataFrame()
+
+try:
+    dashboard_loaded_at = session.sql(
+        "SELECT CURRENT_TIMESTAMP() AS DASHBOARD_LOADED_AT"
+    ).to_pandas()["DASHBOARD_LOADED_AT"].iloc[0]
+except Exception:
+    dashboard_loaded_at = None
+
+
+# ======================================================
+# Validate Report Schema
+# ======================================================
+
+required_cols = [
+    "PIPELINE_NAME",
+    "LAST_STATUS",
+    "FAILURES_24H",
+    "FAILURES_7D",
+    "FAILURES_PREVIOUS_7D",
+    "FAILURE_TREND",
+    "RISK_LEVEL",
+    "STALE_HOURS",
+    "ERROR_MESSAGE",
+    "STATUS_SORT",
+    "OBJECT_TYPE",
+    "DATABASE_NAME",
+    "SCHEMA_NAME",
+]
+
+missing_cols = [column for column in required_cols if column not in df.columns]
+
+if missing_cols:
+    st.error(f"Summary report table is missing expected columns: {', '.join(missing_cols)}")
+    st.stop()
 
 if df.empty:
     st.warning("No pipeline records found in the summary report table.")
     st.stop()
 
-df["ISSUE_CATEGORY"] = df["ERROR_MESSAGE"].apply(categorize_error)
-df["RISK_REASON"] = df.apply(get_risk_reason, axis=1)
-df["REVIEW_CATEGORY"] = df.apply(review_category, axis=1)
+
+# ======================================================
+# Report Freshness
+# ======================================================
+
+if "REPORT_GENERATED_AT" in df.columns:
+    report_generated_at = df["REPORT_GENERATED_AT"].max()
+    freshness_text = (
+        f"Report generated: {str(report_generated_at)[:16]} | "
+        f"Dashboard viewed: {str(dashboard_loaded_at)[:16]}"
+    )
+
+    report_age_hours = (
+        pd.Timestamp.now(tz="UTC") - pd.to_datetime(report_generated_at)
+    ).total_seconds() / 3600
+else:
+    freshness_text = f"Dashboard viewed: {str(dashboard_loaded_at)[:16]}"
+    report_age_hours = None
+
+with caption_col:
+    st.caption(freshness_text)
+
+if report_age_hours is not None and report_age_hours > 2:
+    st.warning(
+        f"Report data is {int(report_age_hours)} hours old. "
+        "The refresh process may need attention."
+    )
+
+
+# ======================================================
+# Business Logic
+# ======================================================
+
+if "ISSUE_CATEGORY" not in df.columns:
+    df["ISSUE_CATEGORY"] = df["ERROR_MESSAGE"].apply(categorize_error)
+
+if "RISK_REASON" not in df.columns:
+    df["RISK_REASON"] = df.apply(get_risk_reason, axis=1)
+
+if "REVIEW_CATEGORY" not in df.columns:
+    df["REVIEW_CATEGORY"] = df.apply(review_category, axis=1)
+
+df["FAILURE_CHANGE"] = df["FAILURES_7D"] - df["FAILURES_PREVIOUS_7D"]
+
+if "PRIORITY" not in df.columns:
+    df["PRIORITY"] = df.apply(priority_label, axis=1)
+
+df["FULL_PIPELINE_NAME"] = (
+    df["DATABASE_NAME"].astype(str)
+    + "-"
+    + df["SCHEMA_NAME"].astype(str)
+    + "-"
+    + df["PIPELINE_NAME"].astype(str)
+)
+
+
+# ======================================================
+# Sidebar Filters
+# ======================================================
 
 st.sidebar.header("Filters")
 
@@ -154,18 +382,24 @@ if df.empty:
     st.warning("No pipelines match the selected filters.")
     st.stop()
 
+
+# ======================================================
+# Operational Groups
+# ======================================================
+
 failed_df = df[df["LAST_STATUS"] == "FAILED"]
-skipped_df = df[df["LAST_STATUS"] == "SKIPPED"]
-healthy_df = df[df["LAST_STATUS"] == "SUCCEEDED"]
 high_risk_df = df[df["RISK_LEVEL"].isin(["HIGH", "CRITICAL"])]
-stale_df = df[(df["STALE_HOURS"] > 6) & (df["LAST_STATUS"] != "FAILED")]
+stale_df = df[
+    (df["STALE_HOURS"] > STALE_THRESHOLD_HOURS)
+    & (df["LAST_STATUS"] != "FAILED")
+]
+recent_failure_df = df[(df["FAILURES_24H"] > 0) | (df["FAILURES_7D"] > 0)].copy()
+recovered_failure_df = recent_failure_df[recent_failure_df["LAST_STATUS"] != "FAILED"]
 
 failed_count = len(failed_df)
-skipped_count = len(skipped_df)
-healthy_count = len(healthy_df)
+recent_failure_count = len(recent_failure_df)
 high_risk_count = len(high_risk_df)
 stale_count = len(stale_df)
-total_count = len(df)
 
 if len(root_df) > 0:
     root_df["ROOT_CAUSE_CATEGORY"] = root_df["ERROR_MESSAGE"].apply(categorize_error)
@@ -183,111 +417,83 @@ highest_priority = df.sort_values(
     ascending=[False, False, False],
 ).head(1)
 
-top_pipeline = highest_priority.iloc[0]["PIPELINE_NAME"]
-top_pipeline_failures = int(highest_priority.iloc[0]["FAILURES_7D"])
-top_pipeline_risk = highest_priority.iloc[0]["RISK_LEVEL"]
-top_pipeline_category = highest_priority.iloc[0]["ISSUE_CATEGORY"]
+highest_priority_pipeline = highest_priority.iloc[0]["PIPELINE_NAME"]
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+# ======================================================
+# KPI Cards
+# ======================================================
+
+col1, col2, col3, col4 = st.columns(4)
+
 col1.metric("Failed", failed_count)
-col2.metric("Skipped", skipped_count)
-col3.metric("Healthy", healthy_count)
-col4.metric("High Risk", high_risk_count)
-col5.metric("Stale Review", stale_count)
-col6.metric("Total", total_count)
+col2.metric("Recent Failures", recent_failure_count)
+col3.metric("High Risk", high_risk_count)
+col4.metric("Stale Review", stale_count)
+
+
+# ======================================================
+# Status Summary
+# ======================================================
+
+if failed_count > 0:
+    st.error(
+        f"{failed_count} pipeline(s) need immediate attention. "
+        f"Top priority: {highest_priority_pipeline}."
+    )
+elif recent_failure_count > 0:
+    st.warning(
+        f"{recent_failure_count} pipeline(s) had recent failures. "
+        "Some may have recovered, but they should still be reviewed."
+    )
+elif high_risk_count > 0:
+    st.warning(f"{high_risk_count} high-risk pipeline(s) should be reviewed.")
+elif stale_count > 0:
+    st.warning(f"{stale_count} pipeline(s) exceeded the expected refresh threshold.")
+else:
+    st.success("No active or recent failures detected.")
 
 with st.expander("How to Read This Report"):
     st.write(
         """
-This report is meant to answer one simple question:
+This report is meant to answer one simple question: **What should I investigate first?**
 
-**What should I investigate first?**
+Priority order:
+1. Active Failures — fix what is currently broken.
+2. Recent Failures / Recovered — verify pipelines that recently failed.
+3. High Risk — watch pipelines with repeated warning signs.
+4. Stale Review — investigate pipelines that may not be refreshing.
 
-- **Failed** means the latest run failed.
-- **Skipped** means the pipeline did not run. Some skipped pipelines may be normal.
-- **Healthy** means the latest run succeeded.
-- **High Risk** means the pipeline has had repeated failures recently.
-- **Stale Review** means the pipeline has not refreshed recently and may need review.
-- **Failure Trend** compares this week to last week.
-- **Stale Hours** means how long it has been since the pipeline last ran.
-
-Start at the **Investigate First** tab. Items at the top should be reviewed first.
+Trend indicators:
+- ▲ Getting Worse
+- ▼ Improving
+- ▬ Stable
 """
     )
 
 st.divider()
-st.subheader("What Broke Today?")
 
-today_df = df[(df["LAST_STATUS"] == "FAILED") | (df["FAILURES_24H"] > 0)].copy()
 
-if today_df.empty:
-    st.success("No new failures detected today.")
-else:
-    today_display = today_df[
-        [
-            "PIPELINE_NAME",
-            "OBJECT_TYPE",
-            "LAST_STATUS",
-            "ISSUE_CATEGORY",
-            "FAILURES_24H",
-            "FAILURES_7D",
-            "ERROR_MESSAGE",
-        ]
-    ].copy()
-
-    today_display = today_display.rename(
-        columns={
-            "PIPELINE_NAME": "Pipeline",
-            "OBJECT_TYPE": "Type",
-            "LAST_STATUS": "Status",
-            "ISSUE_CATEGORY": "Issue Category",
-            "FAILURES_24H": "Failures Today",
-            "FAILURES_7D": "Failures This Week",
-            "ERROR_MESSAGE": "Last Error",
-        }
-    )
-
-    st.dataframe(today_display, use_container_width=True, hide_index=True)
-
-st.subheader("Operations Summary")
-
-if failed_count > 0:
-    st.error(f"{failed_count} pipeline(s) are currently failed. Start with those first.")
-elif high_risk_count > 0:
-    st.warning(f"{high_risk_count} high-risk pipeline(s) should be reviewed.")
-elif stale_count > 0:
-    st.warning(f"{stale_count} stale pipeline(s) may need review.")
-else:
-    st.success("No active failures detected.")
-
-st.subheader("Executive Summary")
-st.info(
-    f"""
-**Current snapshot:** {failed_count} failed pipeline(s), {skipped_count} skipped pipeline(s), and {stale_count} stale/review-needed pipeline(s).
-
-**Highest priority item:** `{top_pipeline}` - {top_pipeline_failures} failure(s) this week, Risk: {top_pipeline_risk}, Issue: {top_pipeline_category}
-
-**Most common issue type:** {top_category}
-
-Use the **Investigate First** tab for the priority list, then use **Drilldown** for details and suggested next steps.
-"""
-)
-
-st.caption(f"App refreshed: {str(last_report_time)[:16]}")
-st.divider()
+# ======================================================
+# Dashboard Tabs
+# ======================================================
 
 tab1, tab2, tab3, tab4 = st.tabs(
     ["Investigate First", "Trends", "Root Causes", "Drilldown"]
 )
 
 display_cols = [
+    "PRIORITY",
+    "FULL_PIPELINE_NAME",
     "PIPELINE_NAME",
     "OBJECT_TYPE",
     "LAST_STATUS",
+    "REVIEW_CATEGORY",
     "ISSUE_CATEGORY",
     "FAILURES_24H",
     "FAILURES_7D",
     "FAILURES_PREVIOUS_7D",
+    "FAILURE_CHANGE",
     "FAILURE_TREND",
     "RISK_LEVEL",
     "RISK_REASON",
@@ -295,61 +501,117 @@ display_cols = [
     "ERROR_MESSAGE",
 ]
 
+
+# ======================================================
+# Tab 1: Investigate First
+# ======================================================
+
 with tab1:
     st.subheader("What Should I Investigate First?")
-    st.info(
-        "This section separates active failures, high-risk items, and stale pipelines "
-        "so healthy items do not clutter the emergency list."
-    )
 
-    st.subheader("Active Failures")
-    if failed_df.empty:
-        st.success("No active failures.")
+    high_risk_only_df = high_risk_df[
+        (high_risk_df["LAST_STATUS"] != "FAILED")
+        & (~high_risk_df["PIPELINE_NAME"].isin(recovered_failure_df["PIPELINE_NAME"]))
+    ]
+
+    if (
+        failed_count == 0
+        and len(recovered_failure_df) == 0
+        and len(high_risk_only_df) == 0
+        and stale_count == 0
+    ):
+        st.success("All pipelines are healthy. No investigation needed.")
     else:
-        st.dataframe(
-            clean_display(
-                failed_df.sort_values(
-                    by=["FAILURES_7D", "STALE_HOURS"], ascending=[False, False]
+        st.info(
+            "**Priority order:** Active Failures → Recent Recovered → High Risk → Stale Review."
+        )
+
+        st.subheader("Active Failures")
+
+        if failed_df.empty:
+            st.success("No active failures.")
+        else:
+            st.error(f"{failed_count} pipeline(s) currently failing.")
+            st.dataframe(
+                clean_display(
+                    failed_df.sort_values(
+                        by=["FAILURES_7D", "STALE_HOURS"],
+                        ascending=[False, False],
+                    ),
+                    display_cols,
                 ),
-                display_cols,
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    st.subheader("High Risk")
-    high_risk_only_df = high_risk_df[high_risk_df["LAST_STATUS"] != "FAILED"]
+        st.subheader("Recent Failures / Recovered")
 
-    if high_risk_only_df.empty:
-        st.success("No additional high-risk pipelines outside of active failures.")
-    else:
-        st.dataframe(
-            clean_display(
-                high_risk_only_df.sort_values(
-                    by=["FAILURES_7D", "STALE_HOURS"], ascending=[False, False]
+        if recovered_failure_df.empty:
+            st.success(
+                "No recent failures that have recovered. "
+                "Check Active Failures for current issues."
+            )
+        else:
+            st.warning(
+                f"{len(recovered_failure_df)} pipeline(s) recently failed but may have recovered."
+            )
+            st.dataframe(
+                clean_display(
+                    recovered_failure_df.sort_values(
+                        by=["FAILURES_24H", "FAILURES_7D", "STALE_HOURS"],
+                        ascending=[False, False, True],
+                    ),
+                    display_cols,
                 ),
-                display_cols,
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    st.subheader("Stale / Review Needed")
-    if stale_df.empty:
-        st.success("No stale pipelines requiring review.")
-    else:
-        st.dataframe(
-            clean_display(
-                stale_df.sort_values(by="STALE_HOURS", ascending=False), display_cols
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.subheader("High Risk")
+
+        if high_risk_only_df.empty:
+            st.success("No additional high-risk pipelines outside of active or recent failures.")
+        else:
+            st.warning(f"{len(high_risk_only_df)} pipeline(s) showing repeated warning signs.")
+            st.dataframe(
+                clean_display(
+                    high_risk_only_df.sort_values(
+                        by=["FAILURES_7D", "STALE_HOURS"],
+                        ascending=[False, False],
+                    ),
+                    display_cols,
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.subheader("Stale Review")
+
+        if stale_df.empty:
+            st.success("No stale pipelines requiring review.")
+        else:
+            st.warning(f"{len(stale_df)} pipeline(s) exceeded the expected refresh threshold.")
+            st.dataframe(
+                clean_display(
+                    stale_df.sort_values(
+                        by=["STALE_HOURS", "PIPELINE_NAME"],
+                        ascending=[False, True],
+                    ),
+                    display_cols,
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+# ======================================================
+# Tab 2: Trends
+# ======================================================
 
 with tab2:
     st.subheader("Pipeline Trends")
     st.caption(
-        "This section shows what types of issues are showing up and whether pipelines are getting better or worse."
+        "This section shows what types of issues are showing up and which pipelines are getting worse."
     )
 
     st.subheader("Issue Category Distribution")
@@ -365,68 +627,38 @@ with tab2:
     else:
         st.success("No failure issue categories detected.")
 
-    st.subheader("Problem Trend Distribution")
-    st.caption("This chart focuses on pipelines that are not stable.")
+    st.subheader("Problem Trend Summary")
+    st.caption("This section only shows pipelines that are getting worse or improving.")
 
     problem_trends = (
         df[df["FAILURE_TREND"] != "▬ Stable"]["FAILURE_TREND"]
         .fillna("Unknown")
         .value_counts()
+        .reset_index()
     )
+
+    problem_trends.columns = ["Trend", "Pipeline Count"]
 
     if problem_trends.empty:
         st.success("No worsening or improving trend detected.")
     else:
-        st.bar_chart(problem_trends)
+        metric_cols = st.columns(min(len(problem_trends), 4))
 
-    st.info(
-        """
-**How to read the trend column:**
+        for idx, row in problem_trends.iterrows():
+            if idx >= 4:
+                break
 
-- **Getting Worse** = more failures this week than last week.
-- **Improving** = fewer failures this week than last week.
-- **Stable** = about the same as last week.
-"""
-    )
+            metric_cols[idx].metric(
+                row["Trend"].replace("▲ ", "").replace("▼ ", "").replace("▬ ", ""),
+                int(row["Pipeline Count"]),
+            )
 
-    trend_sort_order = {"▲ Getting Worse": 1, "▬ Stable": 2, "▼ Improving": 3}
+        st.dataframe(problem_trends, use_container_width=True, hide_index=True)
 
-    trend_df = df[
-        [
-            "PIPELINE_NAME",
-            "OBJECT_TYPE",
-            "LAST_STATUS",
-            "ISSUE_CATEGORY",
-            "FAILURES_7D",
-            "FAILURES_PREVIOUS_7D",
-            "FAILURE_TREND",
-            "RISK_LEVEL",
-            "RISK_REASON",
-        ]
-    ].copy()
 
-    trend_df["_SORT"] = trend_df["FAILURE_TREND"].map(trend_sort_order).fillna(4)
-
-    trend_df = trend_df.sort_values(
-        by=["_SORT", "FAILURES_7D", "FAILURES_PREVIOUS_7D"],
-        ascending=[True, False, False],
-    ).drop(columns="_SORT")
-
-    trend_df = trend_df.rename(
-        columns={
-            "PIPELINE_NAME": "Pipeline",
-            "OBJECT_TYPE": "Type",
-            "LAST_STATUS": "Status",
-            "ISSUE_CATEGORY": "Issue Category",
-            "FAILURES_7D": "Failures This Week",
-            "FAILURES_PREVIOUS_7D": "Failures Last Week",
-            "FAILURE_TREND": "Trend",
-            "RISK_LEVEL": "Risk",
-            "RISK_REASON": "Why This Matters",
-        }
-    )
-
-    st.dataframe(trend_df, use_container_width=True, hide_index=True)
+# ======================================================
+# Tab 3: Root Causes
+# ======================================================
 
 with tab3:
     st.subheader("Top Root Causes")
@@ -467,59 +699,98 @@ with tab3:
         st.subheader("Detailed Error Messages")
         st.dataframe(root_display, use_container_width=True, hide_index=True)
 
+
+# ======================================================
+# Tab 4: Drilldown
+# ======================================================
+
 with tab4:
     st.subheader("Pipeline Drilldown")
-    st.caption("Search for one pipeline and review what is happening.")
+    st.caption("Search by pipeline name, database, schema, or full alert-style name.")
 
     search_text = st.text_input(
         "Search pipeline name",
-        placeholder="Type part of a pipeline name",
+        placeholder=(
+            "Example: ENVIRONMENT_ROSTER, WORKDAY_REPORTS, "
+            "COT_DATA_LAKE-WORKDAY_REPORTS-ENVIRONMENT_ROSTER"
+        ),
     )
 
-    pipeline_options = df["PIPELINE_NAME"].dropna().sort_values().unique()
+    drilldown_df = df.copy()
+
+    drilldown_df["SEARCH_NAME"] = (
+        drilldown_df["FULL_PIPELINE_NAME"].astype(str)
+        + " "
+        + drilldown_df["PIPELINE_NAME"].astype(str)
+        + " "
+        + drilldown_df["DATABASE_NAME"].astype(str)
+        + " "
+        + drilldown_df["SCHEMA_NAME"].astype(str)
+    )
 
     if search_text:
-        pipeline_options = [
-            pipeline
-            for pipeline in pipeline_options
-            if search_text.lower() in pipeline.lower()
+        normalized_search = normalize_text(search_text)
+        drilldown_df = drilldown_df[
+            drilldown_df["SEARCH_NAME"]
+            .apply(normalize_text)
+            .str.contains(normalized_search, case=False, na=False)
         ]
 
-    if len(pipeline_options) == 0:
+    if drilldown_df.empty:
         st.warning("No pipelines match your search.")
     else:
-        selected_pipeline = st.selectbox("Select a pipeline", options=pipeline_options)
-        row = df[df["PIPELINE_NAME"] == selected_pipeline].iloc[0]
+        drilldown_df = drilldown_df.sort_values(
+            by=["STATUS_SORT", "FAILURES_7D", "STALE_HOURS"],
+            ascending=[False, False, False],
+        )
+
+        st.caption(f"{len(drilldown_df)} matching pipeline(s) found.")
+
+        selected_pipeline = st.selectbox(
+            "Select a pipeline",
+            options=drilldown_df["FULL_PIPELINE_NAME"].unique(),
+            index=0,
+            placeholder="Select a pipeline",
+        )
+
+        selected_rows = drilldown_df[
+            drilldown_df["FULL_PIPELINE_NAME"] == selected_pipeline
+        ]
+
+        if selected_rows.empty:
+            st.warning("Selected pipeline was not found in the filtered data.")
+            st.stop()
+
+        row = selected_rows.iloc[0]
 
         stale_hours_val = row["STALE_HOURS"] if pd.notna(row["STALE_HOURS"]) else 0
+        stale_text = format_stale_hours(stale_hours_val)
 
-        if stale_hours_val < 1:
-            stale_text = "Less than 1 hour ago"
-        elif stale_hours_val == 1:
-            stale_text = "1 hour ago"
-        else:
-            stale_text = f"{int(stale_hours_val)} hours ago"
+        d1, d2, d3, d4, d5, d6 = st.columns(6)
 
-        d1, d2, d3, d4, d5 = st.columns(5)
         d1.metric("Status", row["LAST_STATUS"] if pd.notna(row["LAST_STATUS"]) else "Unknown")
-        d2.metric("Review Category", row["REVIEW_CATEGORY"])
-        d3.metric("Failures Today", int(row["FAILURES_24H"]))
-        d4.metric("Failures This Week", int(row["FAILURES_7D"]))
-        d5.metric("Risk", row["RISK_LEVEL"])
+        d2.metric("Pipeline Type", row["OBJECT_TYPE"] if pd.notna(row["OBJECT_TYPE"]) else "Unknown")
+        d3.metric("Investigation Status", row["REVIEW_CATEGORY"])
+        d4.metric("Failures Last 24H", int(row["FAILURES_24H"]))
+        d5.metric("Failures This Week", int(row["FAILURES_7D"]))
+        d6.metric("Risk Score", row["RISK_LEVEL"])
 
+        st.write(f"**Full Pipeline Name:** {row['FULL_PIPELINE_NAME']}")
+        st.write(f"**Pipeline:** {row['PIPELINE_NAME']}")
         st.write(f"**Database:** {row['DATABASE_NAME']}")
         st.write(f"**Schema:** {row['SCHEMA_NAME']}")
         st.write(f"**Type:** {row['OBJECT_TYPE']}")
+        st.write(f"**Priority:** {row['PRIORITY']}")
         st.write(f"**Issue Category:** {row['ISSUE_CATEGORY']}")
         st.write(f"**Trend:** {row['FAILURE_TREND']}")
-        st.write(f"**Last Run:** {stale_text}")
-        st.write(f"**Why This Matters:** {row['RISK_REASON']}")
+        st.write(f"**Last Refresh:** {stale_text}")
+        st.write(f"**Operational Impact:** {row['RISK_REASON']}")
 
         if row["REVIEW_CATEGORY"] != "No Action":
-            st.warning(f"This pipeline is categorized as: {row['REVIEW_CATEGORY']}.")
+            st.warning(f"Investigation status: {row['REVIEW_CATEGORY']}.")
 
-        if stale_hours_val > 6:
-            st.warning(f"This pipeline may be stale - last run was {stale_text}.")
+        if stale_hours_val > STALE_THRESHOLD_HOURS:
+            st.warning(f"This pipeline may be stale — last refresh was {stale_text}.")
 
         if pd.notna(row["ERROR_MESSAGE"]) and str(row["ERROR_MESSAGE"]).strip() != "":
             st.error(f"**Last Error:** {row['ERROR_MESSAGE']}")
@@ -531,15 +802,24 @@ with tab4:
         change = this_week - last_week
 
         w1, w2, w3 = st.columns(3)
+
         w1.metric("Failures This Week", this_week)
         w2.metric("Failures Last Week", last_week)
         w3.metric("Change", f"{'+' if change > 0 else ''}{change}")
 
         st.subheader("Suggested Next Steps")
+
         issue_category = row["ISSUE_CATEGORY"]
+        object_type = row["OBJECT_TYPE"] if pd.notna(row["OBJECT_TYPE"]) else "Unknown"
+
+        st.caption(f"Pipeline type: **{object_type}**")
 
         if row["LAST_STATUS"] == "FAILED":
             if issue_category == "Permissions":
+                st.error("Permission-related failure detected.")
+                st.caption(
+                    "This failure usually indicates the pipeline lost access to one or more required Snowflake objects."
+                )
                 st.error(
                     """
 1. Review the permission or access control error.
@@ -549,7 +829,12 @@ with tab4:
 5. Escalate to the owning/admin team if access cannot be corrected.
 """
                 )
+
             elif issue_category == "Schema Change":
+                st.error("Schema change failure detected.")
+                st.caption(
+                    "This failure usually indicates a mismatch between expected and actual table structure."
+                )
                 st.error(
                     """
 1. Review the schema or column mismatch error.
@@ -559,7 +844,12 @@ with tab4:
 5. Escalate if the source structure changed unexpectedly.
 """
                 )
+
             elif issue_category == "Performance / Timeout":
+                st.error("Performance or timeout failure detected.")
+                st.caption(
+                    "This failure usually indicates the pipeline exceeded available compute resources or time limits."
+                )
                 st.error(
                     """
 1. Review the query or task runtime history.
@@ -569,7 +859,42 @@ with tab4:
 5. Escalate if the timeout continues after retry.
 """
                 )
+
+            elif issue_category == "Dynamic Table Refresh":
+                st.error("Dynamic table refresh failure detected.")
+                st.caption(
+                    "This failure usually indicates the dynamic table could not complete its scheduled refresh."
+                )
+                st.error(
+                    """
+1. Review the dynamic table refresh error message.
+2. Check whether upstream source tables have changed.
+3. Verify the dynamic table definition is still valid.
+4. Check for dependency failures in upstream dynamic tables.
+5. Manually refresh or recreate if the issue persists.
+"""
+                )
+
+            elif issue_category == "SQL / Query Issue":
+                st.error("SQL compilation or query failure detected.")
+                st.caption(
+                    "This failure usually indicates a syntax error or reference to an object that no longer exists."
+                )
+                st.error(
+                    """
+1. Review the SQL compilation or statement error.
+2. Check for recent changes to referenced objects.
+3. Verify column names and data types match expectations.
+4. Test the query manually to reproduce the error.
+5. Fix and redeploy the task or dynamic table definition.
+"""
+                )
+
             elif issue_category == "Snowflake Internal Error":
+                st.error("Snowflake internal error detected.")
+                st.caption(
+                    "This failure originated within Snowflake infrastructure, not from pipeline logic."
+                )
                 st.error(
                     """
 1. Review the Snowflake incident or internal error message.
@@ -579,7 +904,10 @@ with tab4:
 5. Escalate if the internal error persists.
 """
                 )
+
             else:
+                st.error("Pipeline failure detected.")
+                st.caption("Review the error message below for additional context on the root cause.")
                 st.error(
                     """
 1. Review the last error message.
@@ -590,7 +918,24 @@ with tab4:
 """
                 )
 
+        elif row["FAILURES_24H"] > 0 or row["FAILURES_7D"] > 0:
+            st.warning("Recent failures detected — pipeline may have recovered.")
+            st.caption(
+                "The latest run succeeded, but failures occurred recently. Verify the recovery is complete."
+            )
+            st.warning(
+                """
+1. Review the failed run timestamps in Snowflake task or dynamic table history.
+2. Confirm whether the latest successful run fully corrected the issue.
+3. Check whether the same error has repeated this week.
+4. Validate downstream data if the failure affected reporting.
+5. Escalate only if the failure keeps recurring or affects downstream data.
+"""
+            )
+
         elif row["FAILURE_TREND"] == "▲ Getting Worse":
+            st.warning("Failure trend is increasing.")
+            st.caption("This pipeline has more failures this week compared to last week.")
             st.warning(
                 """
 1. Compare failures this week versus last week.
@@ -601,22 +946,59 @@ with tab4:
 """
             )
 
-        elif stale_hours_val > 6:
+        elif stale_hours_val > STALE_THRESHOLD_HOURS:
+            st.warning("Pipeline has not refreshed recently.")
+            st.caption(
+                "This pipeline may be suspended, waiting on upstream data, or experiencing a silent failure."
+            )
             st.warning(
                 """
 1. Confirm the expected pipeline schedule.
 2. Check whether the task or dynamic table refresh is suspended.
 3. Verify upstream data arrived.
-4. Review the last successful run.
-5. Escalate if the pipeline should have run but has not refreshed.
+4. Review the last successful refresh.
+5. Escalate if the pipeline should have refreshed but has not.
 """
             )
 
         else:
             st.success("No immediate investigation steps needed based on the current report.")
 
+        with st.expander("Technical Details"):
+            st.write("Full pipeline name:", row["FULL_PIPELINE_NAME"])
+            st.write("Raw pipeline name:", row["PIPELINE_NAME"])
+            st.write("Database:", row["DATABASE_NAME"])
+            st.write("Schema:", row["SCHEMA_NAME"])
+            st.write("Object type:", row["OBJECT_TYPE"])
+            st.write("Last status:", row["LAST_STATUS"])
+            st.write("Priority:", row["PRIORITY"])
+            st.write("Failures last 24H:", row["FAILURES_24H"])
+            st.write("Failures this week:", row["FAILURES_7D"])
+
+            if "ERROR_CODE" in row.index:
+                st.write("Error code:", row["ERROR_CODE"])
+
+
+# ======================================================
+# Footer
+# ======================================================
+
 st.divider()
+
 st.caption(
-    "Cost-safe design: Streamlit reads from precomputed report tables. "
-    "No live metadata scanning, no AWS integration, no write-back actions, and no scheduled task yet."
+    f"""
+{APP_TITLE} | {APP_PHASE}
+
+Source tables:
+- {summary_table}
+- {root_cause_table}
+
+Architecture:
+- Snowflake-native
+- Read-only reporting
+- Precomputed report tables
+- No live metadata scanning from the Streamlit layer
+- No write-back actions
+- Cost-optimized for operational review
+"""
 )
