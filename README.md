@@ -1,284 +1,208 @@
 # Pipeline Health Monitor
 
-A Snowflake-native Streamlit application for monitoring pipeline health, identifying active failures, tracking recent recovered failures, grouping root causes, and prioritizing operational investigation.
+A Snowflake-native Streamlit application that helps operators answer one question quickly:
 
-This repository contains a scrubbed version of the application source. Environment-specific database names, schema names, roles, warehouses, account identifiers, and operational details are intentionally not committed.
+> **What should I investigate first?**
 
----
+Pipeline Health Monitor prioritizes active failures, recently recovered pipelines, repeated failure patterns, stale candidates, runtime slowdowns, and root-cause signals using precomputed Snowflake reporting tables.
 
-## Purpose
+## Current Release
 
-Pipeline Health Monitor is designed to answer one operational question:
+**v7.9.3 — Phase 1.5 Production Candidate**
 
-**What should I investigate first?**
+This repository contains a scrubbed portfolio version. Environment-specific database names, schemas, roles, warehouses, account identifiers, pipeline names, and operational details are intentionally excluded.
 
-The app reduces manual review across failure emails, Snowflake task history, dynamic table refresh history, and ad hoc troubleshooting by surfacing the highest-priority pipeline issues first.
+## Key Capabilities
 
----
+- Operations HUD with current operational status
+- Viewer-specific, warehouse-metered dashboard credit estimate
+- Active failure prioritization
+- Recent failure and recovery visibility
+- Failure-frequency risk classification
+- Week-over-week trend indicators
+- Potentially stale pipeline review
+- Runtime slowdown detection against successful-run baselines
+- Root-cause grouping and detailed error review
+- Pipeline search and guided investigation steps
+- Report freshness warnings
+- Built-in usage guide and technical reference
+- Responsive dark-mode interface
 
-## Skills Demonstrated
+## Operations HUD
 
-* Snowflake
-* Snowpark
-* Streamlit in Snowflake
-* Python
-* SQL
-* Data operations monitoring
-* Root cause analysis
-* Failure trend analysis
-* Dynamic table monitoring
-* Task monitoring
-* Dashboard development
-* Operational triage workflow design
+The floating Operations HUD combines two high-value signals:
 
----
+1. **Pipeline attention required** — summarizes the highest-priority operational issue.
+2. **Estimated Pipeline Health Monitor credits today** — estimates the current viewer's share of compute on a shared Streamlit warehouse.
 
-## Current Version
+The credit value is deliberately labeled as an **estimate**, not an exact Snowflake billing figure. It is apportioned from warehouse metering using the viewer's recorded Pipeline Health Monitor activity.
 
-### Phase 1: Snowflake-Native Operational Reporting
+## Investigation Workflow
 
-The current application reads from precomputed Snowflake reporting tables:
+1. **Operations HUD** — review the immediate operational summary.
+2. **Active Failures** — investigate pipelines whose latest execution failed.
+3. **Recent Failures / Recovered** — confirm that recovery is stable.
+4. **High Risk** — review repeated failures or elevated warning signals.
+5. **Potentially Stale** — validate pipelines whose last recorded run exceeds the configured review threshold.
+6. **Runtime Watchlist** — inspect abnormal execution duration.
+7. **Root Causes** — identify recurring technical patterns.
+8. **Pipeline Investigation** — search a specific object and review suggested next steps.
 
-* `PIPELINE_SUMMARY_REPORT`
-* `PIPELINE_ROOT_CAUSE_REPORT`
+## Architecture
 
-The Streamlit layer is intentionally cost-conscious and read-only:
+```text
+Snowflake metadata sources
+        ↓
+SQL transformation and classification logic
+        ↓
+Precomputed reporting tables and controlled views
+        ↓
+Streamlit in Snowflake application
+        ↓
+Operator triage and investigation workflow
+```
 
-* No live metadata scanning from Streamlit
-* No write-back actions
-* No AWS integration in Phase 1
-* No scheduled task creation from Streamlit
-* Reporting is performed against precomputed monitor tables
+### Design principles
 
----
-
-## Key Features
-
-* Operations summary metrics
-* Active failure queue
-* Recent failures / recovered pipeline visibility
-* High-risk pipeline queue
-* Stale pipeline review queue
-* Week-over-week failure trend comparison
-* Root cause category grouping
-* Detailed pipeline drilldown
-* Full pipeline name search
-* Search by database, schema, object name, or alert-style name
-* Suggested next investigation steps
-* Sidebar filters for status and object type
-* Technical details section for troubleshooting
-* Report freshness visibility
-
----
-
-## Dashboard Workflow
-
-The dashboard is organized around an operational triage workflow:
-
-1. **Active Failures** — identify what is currently broken.
-2. **Recent Failures / Recovered** — verify pipelines that failed recently but may have recovered.
-3. **High Risk** — review pipelines with repeated warning signs.
-4. **Stale Review** — investigate pipelines that have not refreshed recently.
-5. **Root Causes** — group recurring technical errors into plain-English categories.
-6. **Drilldown** — inspect a specific pipeline and review suggested next steps.
-
----
+- Snowflake-native
+- Read-only application layer
+- Precomputed reporting data
+- Cost-conscious query behavior
+- Explainable rule-based classifications
+- Operator-focused workflow
+- Safe fallback demo data for portfolio use
 
 ## Repository Files
 
-| File               | Description                                         |
-| ------------------ | --------------------------------------------------- |
-| `streamlit_app.py` | Scrubbed Streamlit application source               |
-| `requirements.txt` | Python dependencies for local/reference development |
-| `README.md`        | Project overview and setup notes                    |
-
----
+| File | Description |
+|---|---|
+| `streamlit_app.py` | Scrubbed v7.9.3 Streamlit application |
+| `requirements.txt` | Python dependencies |
+| `README.md` | Project overview, architecture, and setup notes |
 
 ## Configuration
 
-The scrubbed app uses placeholder constants near the top of `streamlit_app.py`:
+The portfolio version uses placeholder values near the top of `streamlit_app.py`:
 
 ```python
-REPORT_DATABASE = "YOUR_DATABASE"
-REPORT_SCHEMA = "YOUR_PIPELINE_MONITOR_SCHEMA"
-SUMMARY_REPORT_TABLE = "PIPELINE_SUMMARY_REPORT"
-ROOT_CAUSE_REPORT_TABLE = "PIPELINE_ROOT_CAUSE_REPORT"
+CONFIG = {
+    "REPORT_DATABASE": "YOUR_DATABASE",
+    "REPORT_SCHEMA": "YOUR_PIPELINE_MONITOR_SCHEMA",
+    "SUMMARY_REPORT_TABLE": "PIPELINE_SUMMARY_REPORT",
+    "ROOT_CAUSE_REPORT_TABLE": "PIPELINE_ROOT_CAUSE_REPORT",
+    "OPERATIONS_HUD_DEMO_MODE": True,
+}
 ```
 
-Replace these values in the deployed Snowflake environment with the database and schema that contain the precomputed reporting tables.
+For a controlled Snowflake deployment:
 
----
+1. Replace the placeholder database and schema.
+2. Deploy the required report tables, credit report view, and query-audit table.
+3. Grant the Streamlit owner role access to those objects.
+4. Set `OPERATIONS_HUD_DEMO_MODE` to `False` only after the live reporting objects are available.
 
-## Expected Data Contract
+## Expected Reporting Objects
 
 ### `PIPELINE_SUMMARY_REPORT`
 
-Expected fields include:
+The application expects operational fields such as:
 
-* `PIPELINE_NAME`
-* `OBJECT_TYPE`
-* `DATABASE_NAME`
-* `SCHEMA_NAME`
-* `LAST_STATUS`
-* `STATUS_SORT`
-* `FAILURES_24H`
-* `FAILURES_7D`
-* `FAILURES_PREVIOUS_7D`
-* `FAILURE_TREND`
-* `RISK_LEVEL`
-* `STALE_HOURS`
-* `ERROR_MESSAGE`
-
-Optional future fields may include:
-
-* `REPORT_GENERATED_AT`
-* `LAST_RUN_AT`
-* `ISSUE_CATEGORY`
-* `REVIEW_CATEGORY`
-* `RISK_REASON`
-* `PRIORITY`
-* `ERROR_CODE`
+- pipeline identity and object type
+- latest status and execution time
+- 24-hour and seven-day failure counts
+- prior-period failure counts and trends
+- risk and investigation classifications
+- stale hours
+- successful runtime baselines
+- runtime status and slowdown ratios
+- error details and report-generated timestamp
 
 ### `PIPELINE_ROOT_CAUSE_REPORT`
 
 Expected fields include:
 
-* `ERROR_MESSAGE`
-* `FAILURE_COUNT`
-* `PERCENT_OF_FAILURES`
+- `ERROR_MESSAGE`
+- `FAILURE_COUNT`
+- `PERCENT_OF_FAILURES`
+- optional root-cause category
 
----
+### Credit estimation objects
+
+The live Operations HUD uses controlled reporting objects similar to:
+
+- `PIPELINE_MONITOR_QUERY_AUDIT`
+- `PIPELINE_MONITOR_USER_CREDIT_REPORT`
+
+These map owner-rights Streamlit queries to the actual viewer and estimate the viewer's share of shared warehouse compute.
 
 ## Metadata Sources
 
-Phase 1 is designed around Snowflake-native metadata sources such as:
+The backend reporting layer can be built from Snowflake metadata sources including:
 
-* `TASK_HISTORY`
-* `SERVERLESS_TASK_HISTORY`
-* `DYNAMIC_TABLE_REFRESH_HISTORY`
-* `QUERY_HISTORY`
+- `TASK_HISTORY`
+- `SERVERLESS_TASK_HISTORY`
+- `DYNAMIC_TABLE_REFRESH_HISTORY`
+- `QUERY_HISTORY`
+- `WAREHOUSE_METERING_HISTORY`
 
-The Streamlit app does not query these metadata sources directly in normal operation. Instead, the app reads from precomputed reporting tables.
+The Streamlit application does not perform broad live metadata scans during normal use. It reads precomputed reporting objects instead.
 
----
+## Runtime Classification
 
-## Architecture
+Runtime alerts compare the latest successful runtime with the seven-day median:
 
-```text
-Snowflake Metadata
-        ↓
-Report Views / SQL Logic
-        ↓
-Precomputed Reporting Tables
-        ↓
-Streamlit in Snowflake Dashboard
-        ↓
-Operator Investigation Workflow
-```
+| Status | Rule |
+|---|---|
+| Critical Slowdown | At least 3× median and at least 120 seconds slower |
+| High Slowdown | At least 2× median and at least 60 seconds slower |
+| Elevated | At least 1.5× median and at least 30 seconds slower |
+| Normal | Baseline exists and thresholds are not met |
+| Insufficient History | Fewer than three successful measurements |
 
-Design principles:
+These are investigation signals, not SLA violations.
 
-* Snowflake-native
-* Read-only dashboard layer
-* Precomputed report tables
-* Cost-conscious
-* Explainable rule-based logic
-* Operationally focused
-* Designed for future predictive monitoring
+## Current Limitations
 
----
-
-## Screenshots
-
-Add screenshots to a `screenshots/` folder and reference them here.
-
-```markdown
-![Overview](screenshots/overview.png)
-![Investigate First](screenshots/investigate-first.png)
-![Root Causes](screenshots/root-causes.png)
-![Drilldown](screenshots/drilldown.png)
-```
-
-Recommended screenshots:
-
-* Overview / KPI summary
-* Investigate First tab
-* Trends tab
-* Root Causes tab
-* Drilldown tab
-
----
+- Staleness uses elapsed time and is not yet schedule-aware.
+- Dependency-aware downstream impact analysis is not yet implemented.
+- AWS DMS, Glue, Lambda, and CloudWatch integration remain future enhancements.
+- The credit value is an apportioned estimate and will not exactly match billing exports.
 
 ## Roadmap
 
-### Phase 1 — Snowflake-Native Monitoring
+### Phase 2 — Broader operational visibility
 
-Current focus:
+- AWS DMS monitoring
+- AWS Glue job visibility
+- AWS Lambda execution signals
+- CloudWatch and EventBridge integration
+- dependency mapping
+- schedule-aware stale thresholds
 
-* Task monitoring
-* Dynamic table monitoring
-* Failure prioritization
-* Root cause grouping
-* Stale pipeline review
-* Pipeline drilldown
-* Suggested next steps
+### Phase 3 — Predictive monitoring
 
-### Phase 1.5 — Operational Improvements
+- reliability scoring
+- failure probability indicators
+- anomaly detection
+- failure-pattern detection
+- ownership and business-criticality reporting
+- SLA and recovery metrics
 
-Potential enhancements:
-
-* `REPORT_GENERATED_AT`
-* `REPORT_METADATA` table
-* `LAST_RUN_AT`
-* SQL-side `ISSUE_CATEGORY`
-* SQL-side `REVIEW_CATEGORY`
-* SQL-side `RISK_REASON`
-* Pipeline ownership mapping
-* Business criticality classification
-* Pipeline coverage metrics
-
-### Phase 2 — Broader Operational Visibility
-
-Potential integrations:
-
-* AWS DMS
-* AWS Glue
-* AWS Lambda
-* CloudWatch
-* EventBridge
-* S3 / Snowpipe
-
-### Phase 3 — Predictive Monitoring
-
-Potential future capabilities:
-
-* Reliability scoring
-* Failure probability scoring
-* Anomaly detection
-* Failure pattern detection
-* Team ownership reporting
-* SLA tracking
-* Predictive pipeline health indicators
-
----
-
-## Security Notes
-
-This repository should remain scrubbed.
+## Security and Scrubbing
 
 Do not commit:
 
-* Real Snowflake account identifiers
-* Production database or schema names
-* Role, warehouse, or user names tied to a workplace environment
-* Secrets, tokens, passwords, private keys, or connection files
-* Raw operational exports that may contain sensitive object names
-* Internal email alerts or screenshots containing sensitive details
+- real Snowflake account identifiers
+- workplace database, schema, role, warehouse, or user names
+- secrets, keys, tokens, passwords, or connection files
+- raw operational exports
+- internal email addresses or alert messages
+- screenshots containing sensitive pipeline or environment details
 
----
+## Skills Demonstrated
+
+Snowflake · Snowpark · Streamlit · Python · SQL · Data engineering · Operational monitoring · Root-cause analysis · Cost attribution · UX design · Production hardening
 
 ## Project Status
 
-**Current status:** Phase 1 release candidate
-
-The current version is focused on operational triage and Snowflake-native monitoring. Future versions may expand into ownership tracking, broader cloud pipeline visibility, and predictive monitoring.
+**Phase 1.5 production candidate.** The current version is a complete Snowflake-native operational monitoring portfolio project and a stable baseline for future capability development.
